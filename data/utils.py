@@ -6,6 +6,66 @@ import torch
 import torch.distributed as dist
 
 import utils
+from PIL import Image, ImageFilter, ImageDraw
+
+from tqdm import tqdm
+
+
+def blur_except_box(image, bounding_box):
+    """
+    Apply blur to all areas except the selected bounding box.
+
+    :param image_path: Path to the input image.
+    :param bounding_boxes: List of bounding boxes in the format [(x1, y1, x2, y2), ...].
+    :param output_path: Path to save the output image.
+    """
+    # Apply blur filter to the entire image
+    blurred_image = image.filter(ImageFilter.GaussianBlur(15))
+
+    # Create a mask for the unblurred area
+    mask = Image.new("L", image.size, 0)
+    draw = ImageDraw.Draw(mask)
+
+    # Draw the selected bounding box on the mask
+    draw.rectangle(bounding_box, fill=255)
+
+    # Composite the images using the mask
+    final_image = Image.composite(image, blurred_image, mask)
+
+    return final_image
+
+
+def get_captions(annotation):
+    data = []
+    id = 0
+    for i, record in tqdm(enumerate(annotation), total=len(annotation)):
+        image_id = next(iter(record.keys()))
+        image_path = image_id+".jpg"
+        
+        for region in record[image_id]['regions']:
+            bbox = (region['x'], region['y'], region['x']+region['width'], region['y']+region['height'])
+        
+            for caption in region['captions'][:1]:
+                item = {
+                    'prompt': "This image is that ",
+                    'caption': caption['caption'],
+                    'image': image_path,
+                    'image_id': image_id,
+                    'bbox': bbox,
+                    'id': id,
+                }
+                data.append(item)
+                id += 1
+    return data
+
+def get_each_json(ann_paths):
+    annotation = []
+    for ann_path in ann_paths:
+        data = json.load(open(ann_path, "r"))
+        if type(data) == dict:
+            annotation.append(data)
+    return annotation
+
 
 def pre_caption(caption,max_words=50):
     caption = re.sub(
@@ -81,6 +141,11 @@ from pycocotools.coco import COCO
 from pycocoevalcap.eval import COCOEvalCap
 from torchvision.datasets.utils import download_url
 
+from data.utils import get_each_json, get_captions
+
+from pathlib import Path
+import glob
+
 def coco_caption_eval(coco_gt_root, results_file, split):
     urls = {'val':'https://storage.googleapis.com/sfr-vision-language-research/datasets/coco_karpathy_val_gt.json',
             'test':'https://storage.googleapis.com/sfr-vision-language-research/datasets/coco_karpathy_test_gt.json'}
@@ -100,6 +165,33 @@ def coco_caption_eval(coco_gt_root, results_file, split):
     # coco_eval.params['image_id'] = coco_result.getImgIds()
     # please remove this line when evaluating the full validation set
     # coco_eval.params['image_id'] = coco_result.getImgIds()
+
+    # evaluate results
+    # SPICE will take a few minutes the first time, but speeds up due to caching
+    coco_eval.evaluate()
+
+    # print output evaluation scores
+    for metric, score in coco_eval.eval.items():
+        print(f'{metric}: {score:.3f}')
+    
+    return coco_eval
+
+
+def core_caption_eval(coco_gt_root, results_file, split):
+    annotation = get_each_json(glob.glob(str(Path(coco_gt_root) / 'test/*json')))
+    annotation = get_captions(annotation)
+
+    # annotation_file = os.path.join(coco_gt_root,filenames[split])
+    
+    # create coco object and coco_result object
+    coco = COCO()
+    coco.dataset = annotation
+    coco.createIndex()
+
+    coco_result = coco.loadRes(results_file)
+
+    # create coco_eval object by taking coco and coco_result
+    coco_eval = COCOEvalCap(coco, coco_result)
 
     # evaluate results
     # SPICE will take a few minutes the first time, but speeds up due to caching
